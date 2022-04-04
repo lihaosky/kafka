@@ -133,19 +133,22 @@ public class KStreamWindowAggregate<KIn, VIn, VAgg, W extends Window> implements
                     sendOldValues);
             }
 
+            System.out.println("Emit strategy=" + emitStrategy.type());
+
             // Restore last emit close time for ON_WINDOW_CLOSE strategy
             if (emitStrategy.type() == StrategyType.ON_WINDOW_CLOSE) {
                 final Long lastEmitTime = internalProcessorContext.processorMetadataForKey(storeName);
                 if (lastEmitTime != null) {
                     lastEmitCloseTime = lastEmitTime;
                 }
-                timeTracker.setEmitInterval(
-                    StreamsConfig.InternalConfig.getLong(
-                        context.appConfigs(),
-                        EMIT_INTERVAL_MS_KSTREAMS_WINDOWED_AGGREGATION,
-                        1000L
-                    )
+                System.out.println("lastEmitCloseTime=" + lastEmitCloseTime);
+                final long emitInterval = StreamsConfig.InternalConfig.getLong(
+                    context.appConfigs(),
+                    EMIT_INTERVAL_MS_KSTREAMS_WINDOWED_AGGREGATION,
+                    1000L
                 );
+                timeTracker.setEmitInterval(emitInterval);
+                System.out.print("EmitInterval=" + emitInterval);
             }
         }
 
@@ -242,65 +245,67 @@ public class KStreamWindowAggregate<KIn, VIn, VAgg, W extends Window> implements
         }
 
         private void tryEmitFinalResult(final Record<KIn, VIn> record, final long closeTime) {
-            if (emitStrategy.type() == StrategyType.ON_WINDOW_CLOSE) {
-                final long now = internalProcessorContext.currentSystemTimeMs();
-                // Throttle emit frequency
-                if (now < timeTracker.nextTimeToEmit) {
-                    return;
-                }
-
-                // Schedule next emit time based on now to avoid the case that if system time jumps a lot,
-                // this can be triggered everytime
-                timeTracker.nextTimeToEmit = now;
-                timeTracker.advanceNextTimeToEmit();
-
-                // Close time does not progress
-                if (lastEmitCloseTime != ConsumerRecord.NO_TIMESTAMP && lastEmitCloseTime >= closeTime) {
-                    return;
-                }
-
-                final long emitWindowStart = closeTime - windows.size();
-                if (emitWindowStart < 0) {
-                    // If emitWindowStart is 0, it means first window closes since windowEndTime
-                    // is exclusive
-                    return;
-                }
-
-                // Because we only get here when emitWindowStart > 0 which means closeTime > windows.size()
-                // Since we set lastEmitCloseTime to closeTime before storing to processor metadata
-                // lastEmitCloseTime - windows.size() is always > 0
-                // Set lastEmitWindowStart to -1L if not set so that when we fetchAll, we fetch from 0L
-                final long lastEmitWindowStart = lastEmitCloseTime == ConsumerRecord.NO_TIMESTAMP ?
-                    -1L : lastEmitCloseTime - windows.size();
-
-                if (lastEmitCloseTime != ConsumerRecord.NO_TIMESTAMP) {
-                    final Map<Long, W> matchedCloseWindows = windows.windowsFor(emitWindowStart);
-                    final Map<Long, W> matchedEmitWindows = windows.windowsFor(lastEmitWindowStart);
-
-                    // Don't fetch store if the new emit window close time doesn't progress enough to cover next
-                    // window
-                    if (matchedCloseWindows.equals(matchedEmitWindows)) {
-                        log.debug("no new windows to emit. LastEmitCloseTime={}, newCloseTime={}",
-                            lastEmitCloseTime, closeTime);
-                        return;
-                    }
-                }
-
-                final KeyValueIterator<Windowed<KIn>, ValueAndTimestamp<VAgg>> windowToEmit =  windowStore
-                    .fetchAll(lastEmitWindowStart + 1, emitWindowStart);
-
-                while (windowToEmit.hasNext()) {
-                    final KeyValue<Windowed<KIn>, ValueAndTimestamp<VAgg>> kv = windowToEmit.next();
-                    tupleForwarder.maybeForward(
-                        record.withKey(kv.key)
-                            .withValue(new Change<>(kv.value.value(), null))
-                            .withTimestamp(kv.value.timestamp())
-                            .withHeaders(null)); // Don't set header
-                }
-
-                lastEmitCloseTime = closeTime;
-                internalProcessorContext.addProcessorMetadataKeyValue(storeName, closeTime);
+            if (emitStrategy.type() != StrategyType.ON_WINDOW_CLOSE) {
+                return;
             }
+
+            final long now = internalProcessorContext.currentSystemTimeMs();
+            // Throttle emit frequency
+            if (now < timeTracker.nextTimeToEmit) {
+                return;
+            }
+
+            // Schedule next emit time based on now to avoid the case that if system time jumps a lot,
+            // this can be triggered everytime
+            timeTracker.nextTimeToEmit = now;
+            timeTracker.advanceNextTimeToEmit();
+
+            // Close time does not progress
+            if (lastEmitCloseTime != ConsumerRecord.NO_TIMESTAMP && lastEmitCloseTime >= closeTime) {
+                return;
+            }
+
+            final long emitWindowStart = closeTime - windows.size();
+            if (emitWindowStart < 0) {
+                // If emitWindowStart is 0, it means first window closes since windowEndTime
+                // is exclusive
+                return;
+            }
+
+            // Because we only get here when emitWindowStart > 0 which means closeTime > windows.size()
+            // Since we set lastEmitCloseTime to closeTime before storing to processor metadata
+            // lastEmitCloseTime - windows.size() is always > 0
+            // Set lastEmitWindowStart to -1L if not set so that when we fetchAll, we fetch from 0L
+            final long lastEmitWindowStart = lastEmitCloseTime == ConsumerRecord.NO_TIMESTAMP ?
+                -1L : lastEmitCloseTime - windows.size();
+
+            if (lastEmitCloseTime != ConsumerRecord.NO_TIMESTAMP) {
+                final Map<Long, W> matchedCloseWindows = windows.windowsFor(emitWindowStart);
+                final Map<Long, W> matchedEmitWindows = windows.windowsFor(lastEmitWindowStart);
+
+                // Don't fetch store if the new emit window close time doesn't progress enough to cover next
+                // window
+                if (matchedCloseWindows.equals(matchedEmitWindows)) {
+                    log.debug("no new windows to emit. LastEmitCloseTime={}, newCloseTime={}",
+                        lastEmitCloseTime, closeTime);
+                    return;
+                }
+            }
+
+            final KeyValueIterator<Windowed<KIn>, ValueAndTimestamp<VAgg>> windowToEmit =  windowStore
+                .fetchAll(lastEmitWindowStart + 1, emitWindowStart);
+
+            while (windowToEmit.hasNext()) {
+                final KeyValue<Windowed<KIn>, ValueAndTimestamp<VAgg>> kv = windowToEmit.next();
+                tupleForwarder.maybeForward(
+                    record.withKey(kv.key)
+                        .withValue(new Change<>(kv.value.value(), null))
+                        .withTimestamp(kv.value.timestamp())
+                        .withHeaders(null)); // Don't set header
+            }
+
+            lastEmitCloseTime = closeTime;
+            internalProcessorContext.addProcessorMetadataKeyValue(storeName, closeTime);
         }
     }
 
